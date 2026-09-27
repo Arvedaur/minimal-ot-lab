@@ -1,0 +1,9 @@
+.env
+openplc/data/
+influxdb/data/
+grafana/data/
+fuxa/appdata/
+fuxa/db/
+fuxa/logs/
+captures/*.pcap
+tests/validation/test-matrix-results.csv

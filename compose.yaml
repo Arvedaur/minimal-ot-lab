@@ -1,0 +1,226 @@
+name: minimal-ot-lab
+
+networks:
+  # NOT: internal:true KASITLI OLARAK KULLANILMIYOR. Docker, "internal: true"
+  # isaretli bir network'teki container'lar icin host port-publish (127.0.0.1:xxxx)
+  # NAT/proxy altyapisini kurmuyor - bu yuzden openplc/fuxa/influxdb/grafana
+  # host'a hic acilamiyordu. Network'ler arasi izolasyon zaten HANGI container'in
+  # HANGI network'e bagli oldugundan geliyor (openplc/fuxa asla central_ot_net'e
+  # baglanmiyor) - bu, ayri Docker bridge network'lerinin varsayilan davranisidir
+  # ve internal:true olmadan da gecerlidir. internal:true sadece "internete cikis
+  # engeli" ekliyordu, bu da zaten image build/pull icin gerekli internete
+  # ihtiyacimizla celisiyordu.
+  plc_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${PLC_NET_SUBNET:-172.20.10.0/24}
+  collection_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${COLLECTION_NET_SUBNET:-172.20.20.0/24}
+  central_ot_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${CENTRAL_OT_NET_SUBNET:-172.20.30.0/24}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  # ---------------------------------------------------------------------
+  # Asama 2 - PLC katmani (Modbus TCP :502, sadece plc_net'te)
+  # ---------------------------------------------------------------------
+  openplc:
+    build:
+      context: ./openplc
+    container_name: otlab-openplc
+    hostname: openplc
+    networks:
+      - plc_net
+    ports:
+      - "127.0.0.1:8080:8080"   # web UI/dashboard (HTTP) - yalnizca localhost
+    volumes:
+      - ./openplc/project:/workdir/webserver/st_files
+      - ./openplc/data:/workdir/webserver/db
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/login', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ---------------------------------------------------------------------
+  # Asama 3 - Plant SCADA / HMI (yalnizca plc_net'te, dogrudan central'a erisemez)
+  # ---------------------------------------------------------------------
+  fuxa:
+    # :latest yerine digest ile pinlendi (Asama 10 hardening kabul kriteri).
+    # Guncellemek icin: docker pull frangoteam/fuxa:latest && docker images --digests frangoteam/fuxa
+    image: frangoteam/fuxa@sha256:95864451c1e4045ee3b371ecf515d00e5934d8ee8127e02e609b2df9e620a3ff
+    container_name: otlab-fuxa
+    hostname: fuxa
+    depends_on:
+      openplc:
+        condition: service_healthy
+    networks:
+      - plc_net
+    ports:
+      - "127.0.0.1:1881:1881"   # HMI UI - yalnizca localhost
+    volumes:
+      - ./fuxa/appdata:/usr/src/app/FUXA/server/_appdata
+      - ./fuxa/db:/usr/src/app/FUXA/server/_db
+      - ./fuxa/logs:/usr/src/app/FUXA/server/_logs
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # Asama 5 - Data collection agent (plc_net + collection_net; dual-homed)
+  # ---------------------------------------------------------------------
+  telegraf:
+    image: telegraf:1.31-alpine
+    container_name: otlab-telegraf
+    hostname: telegraf
+    depends_on:
+      openplc:
+        condition: service_healthy
+    networks:
+      - plc_net
+      - collection_net
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    env_file:
+      - .env
+    user: "65534:65534"   # nobody - Telegraf non-root calisabilir
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # Asama 8 - Guvenlik siniri (collection_net + central_ot_net; dual-homed)
+  # NET_ADMIN/NET_RAW zorunlu istisna: forwarding + tcpdump icin gerekli.
+  # ---------------------------------------------------------------------
+  firewall:
+    build:
+      context: ./firewall
+    container_name: otlab-firewall
+    hostname: firewall
+    depends_on:
+      - telegraf
+      - influxdb
+    networks:
+      - collection_net
+      - central_ot_net
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.rp_filter=0
+    volumes:
+      - ./captures/firewall:/captures
+      - ./firewall/rules:/rules:ro
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # Asama 6 - Historian (yalnizca central_ot_net'te; plc_net'ten erisilemez)
+  # ---------------------------------------------------------------------
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: otlab-influxdb
+    hostname: influxdb
+    networks:
+      - central_ot_net
+    ports:
+      - "127.0.0.1:8086:8086"   # admin/ilk kurulum icin - yalnizca localhost
+    volumes:
+      - ./influxdb/data:/var/lib/influxdb2
+    env_file:
+      - .env
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=${INFLUXDB_INIT_MODE:-setup}
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_INIT_USERNAME}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_INIT_PASSWORD}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_INIT_ORG}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_INIT_BUCKET}
+      - DOCKER_INFLUXDB_INIT_RETENTION=${INFLUXDB_INIT_RETENTION}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_INIT_ADMIN_TOKEN}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # ISTISNA (canli dogrulandi): influxdb'nin entrypoint script'i container
+    # ilk baslarken /var/lib/influxdb2/engine dizinini root olarak olusturup
+    # sahiplik/izinlerini duzeltiyor (sonra influxdb kullanicisina dusuyor).
+    # Sadece cap_drop:ALL ile "mkdir: Permission denied" hatasiyla crash
+    # oluyor - bu 3 capability'yi geri veriyoruz (hala "ALL"dan cok daha
+    # kisitli, NET_ADMIN/SYS_ADMIN gibi tehlikeli olanlar YOK).
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    logging: *default-logging
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ---------------------------------------------------------------------
+  # Asama 7 - Merkezi gorsellestirme (yalnizca central_ot_net'te)
+  # ---------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: otlab-grafana
+    hostname: grafana
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - central_ot_net
+    ports:
+      - "127.0.0.1:3000:3000"   # yalnizca localhost
+    volumes:
+      - ./grafana/data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    env_file:
+      - .env
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_SECURITY_DISABLE_GRAVATAR=true
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - INFLUXDB_GRAFANA_TOKEN=${INFLUXDB_GRAFANA_TOKEN}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+    restart: unless-stopped

@@ -1,0 +1,46 @@
+{
+  "title": "OT Lab - Turbine Overview",
+  "uid": "otlab-turbine-overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "title": "Wind Speed (m/s)", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "influxdb", "uid": "InfluxDB-Turbine" },
+      "targets": [{ "query": "from(bucket: \"turbine\") |> range(start: v.timeRangeStart, stop: v.timeRangeStop) |> filter(fn: (r) => r._measurement == \"turbine\" and r._field == \"wind_speed_ms\")" }]
+    },
+    {
+      "id": 2, "title": "Rotor Speed (rpm)", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "influxdb", "uid": "InfluxDB-Turbine" },
+      "targets": [{ "query": "from(bucket: \"turbine\") |> range(start: v.timeRangeStart, stop: v.timeRangeStop) |> filter(fn: (r) => r._measurement == \"turbine\" and r._field == \"rotor_speed_rpm\")" }]
+    },
+    {
+      "id": 3, "title": "Active Power (kW)", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "influxdb", "uid": "InfluxDB-Turbine" },
+      "targets": [{ "query": "from(bucket: \"turbine\") |> range(start: v.timeRangeStart, stop: v.timeRangeStop) |> filter(fn: (r) => r._measurement == \"turbine\" and r._field == \"active_power_kw\")" }]
+    },
+    {
+      "id": 4, "title": "Generator Temp (C)", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "influxdb", "uid": "InfluxDB-Turbine" },
+      "targets": [{ "query": "from(bucket: \"turbine\") |> range(start: v.timeRangeStart, stop: v.timeRangeStop) |> filter(fn: (r) => r._measurement == \"turbine\" and r._field == \"generator_temp_c\")" }]
+    },
+    {
+      "id": 5, "title": "General Alarm", "type": "state-timeline",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "influxdb", "uid": "InfluxDB-Turbine" },
+      "targets": [{ "query": "from(bucket: \"turbine\") |> range(start: v.timeRangeStart, stop: v.timeRangeStop) |> filter(fn: (r) => r._measurement == \"turbine\" and r._field == \"general_alarm\")" }]
+    },
+    {
+      "id": 6, "title": "Last Data Timestamp (freshness)", "type": "stat",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "influxdb", "uid": "InfluxDB-Turbine" },
+      "targets": [{ "query": "from(bucket: \"turbine\") |> range(start: -5m) |> filter(fn: (r) => r._measurement == \"turbine\" and r._field == \"active_power_kw\") |> last()" }]
+    }
+  ]
+}
